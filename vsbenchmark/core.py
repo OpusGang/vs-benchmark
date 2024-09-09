@@ -98,7 +98,7 @@ class VSBenchmark:
                             if thread_count == 1:
                                 self._single_thread_time = metrics[Metric.TIME]
 
-    def _calculate_metrics(self, passes_data: List[Dict[str, float]], thread_count: int, single_thread_time: Optional[float], length: int) -> Dict[Metric, float]:
+    def _calculate_metrics(self: Self, passes_data: List[Dict[str, float]], thread_count: int, single_thread_time: Optional[float], length: int) -> Dict[Metric, float]:
         avg_time = sum(pass_data['elapsed_time'] for pass_data in passes_data) / len(passes_data)
         return {
             Metric.TIME: avg_time,
@@ -108,7 +108,7 @@ class VSBenchmark:
             Metric.MEMORY_USAGE: sum(pass_data['memory_usage'] for pass_data in passes_data) / len(passes_data)
         }
 
-    def save_results(self, filename: str, overwrite: bool = False) -> None:
+    def save_results(self: Self, filename: str, overwrite: bool = False) -> None:
         """
         Save the benchmark results to a JSON file.
 
@@ -126,7 +126,7 @@ class VSBenchmark:
         with open(filename, 'w') as f:
             json.dump(serialized_results, f, indent=2)
 
-    def _serialize_results(self) -> Dict:
+    def _serialize_results(self: Self) -> Dict:
         """
         Convert the results to a JSON-serializable format.
 
@@ -145,7 +145,7 @@ class VSBenchmark:
                     }
         return serialized
 
-    def load_results(self, filename: str) -> None:
+    def load_results(self: Self, filename: str) -> None:
         """
         Load benchmark results from a JSON file.
 
@@ -217,7 +217,7 @@ class VSBenchmark:
                         table_data.append(row)
 
                 print(tabulate(table_data, headers=headers, tablefmt='simple'))
-                print()  # Add an extra newline for better readability
+                print()
 
     def _get_sorted_results(self: Self) -> List[Tuple[Tuple[int, int], Dict]]:
         """

@@ -1,4 +1,4 @@
-from typing import Any, Dict
+from typing import Any, Dict, Self
 import psutil
 import os
 import time
@@ -7,15 +7,15 @@ from enum import Flag, auto
 
 
 class Logger:
-    def __init__(self):
+    def __init__(self: Self):
         self.current_process = psutil.Process(os.getpid())
 
-    def log_start(self):
+    def log_start(self: Self):
         self.current_process.cpu_percent()
         self.start_time = time.perf_counter()
         self.start_cpu_time = time.process_time()
 
-    def log_end(self) -> Dict[str, Any]:
+    def log_end(self: Self) -> Dict[str, Any]:
         end_time = time.perf_counter()
         end_cpu_time = time.process_time()
 
