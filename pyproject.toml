@@ -1,0 +1,19 @@
+[tool.poetry]
+name = "vsbenchmark"
+version = "0.1.0"
+description = ""
+authors = ["OpusGang"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.12"
+vapoursynth = "^69"
+vstools = "^3.2.0"
+numpy = "1.26.4"
+psutil = "^6.0.0"
+tabulate = "^0.9.0"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
