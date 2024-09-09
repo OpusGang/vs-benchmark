@@ -14,9 +14,9 @@ class VSBenchmark:
     functions: Dict[str, Callable[[vs.VideoNode, Dict[str, Any]], vs.VideoNode]]
     formats: List[int] = field(default_factory=lambda: [vs.GRAYS])
     resolutions: List[Tuple[int, int]] = field(default_factory=lambda: [(1280, 720), (1920, 1080), (3840, 2160)])
-    passes: int = 1
+    passes: int = 3
     max_threads: Optional[int] = None
-    length: int = 600
+    length: int = 240
     dynamic_length: bool = False
     param_grid: Optional[Dict[str, Union[List[float], List[int]]]] = None
     param_mapping: Optional[Dict[str, Union[List[str], Callable[[], List[Dict[str, Any]]]]]] = None
