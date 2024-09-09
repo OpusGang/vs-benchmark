@@ -60,6 +60,17 @@ benchmark = VSBenchmark(
     param_mapping=param_mapping,
 )
 
+# If function signatures match, the call can be simplified
+
+benchmark = VSBenchmark(
+    functions={
+        "std boxblur": lambda x, params: core.std.BoxBlur(x, **params),
+        "zip boxblur": lambda x, params: core.vszip.BoxBlur(x, **params)
+    },
+    formats=[vs.GRAY16, vs.GRAYS],
+    resolutions=[(1920, 1080), (3840, 2160)],
+    length=240
+)
 
 # Run benchmark and save data to json
 benchmark.run_benchmark()
