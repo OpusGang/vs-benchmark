@@ -1,12 +1,15 @@
 # vs-benchmark
 Moderately extensive tool for benchmarking Vapoursynth functions en masse
 
-Limitations and considerations
+## Limitations and considerations
 
-- Memory usage is not GC'd between runs, so testing multiple functions returns bogus results 
-- Short benchmarks may not accurately be accurately reported (psutil bug maybe)
+1. **Problem**: Memory usage is not garbage collected (GC'd) between runs, so testing multiple functions returns bogus results.
+   - **Note**: Memory usage should be reasonably reliable when passing only a single item in the dict
 
-see example.py for usage
+2. **Problem**: Short benchmarks may not be accurately reported (0 fps). I think it's a psutil bug.
+   - **Note**: This should only be a problem for extremely short runs
+
+See [example.py](https://github.com/OpusGang/vs-benchmark/blob/main/example.py) for usage
 
 ```
 Resolution: 1920x1080
