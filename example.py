@@ -1,9 +1,10 @@
 import itertools
 from vstools import vs, core
 from vsrgtools import box_blur
-from vsbenchmark import VSBenchmark, DisplayMetric
+from vsbenchmark import VSBenchmark, Metric
 
-_range = range(1, 3)
+_range = range(1, 2)
+
 
 def box_blur_generator() -> list[dict[str, int]]:
     passes = _range
@@ -50,19 +51,26 @@ core.num_threads = 1
 benchmark = VSBenchmark(
     functions=functions,
     formats=[vs.GRAY16, vs.GRAYS],
-    resolutions=[(3840, 2160)],
-    length=100,
+    resolutions=[(1920, 1080), (3840, 2160)],
+    length=240,
+    dynamic_length=True,
     max_threads=None,
-    passes=4,
+    passes=3,
     param_grid=param_grid,
     param_mapping=param_mapping,
 )
 
 
+# Run benchmark and save data to json
 benchmark.run_benchmark()
-benchmark.print_results(DisplayMetric.TIME | DisplayMetric.FPS)
-benchmark.print_summary(DisplayMetric.ALL)
+benchmark.save_results('benchmark_results.json', overwrite=True)
 
-# TODO
-# benchmark.write("data.csv")
-# benchmark.plot()
+# Display results for specific metrics
+benchmark.display_results(Metric.TIME | Metric.FPS | Metric.CPU_USAGE)
+
+# Display best funciton
+benchmark.compare_functions(Metric.FPS)
+
+# Load existing data and compare functions based on FPS
+# benchmark.load_results('benchmark_results.json')
+# benchmark.compare_functions(Metric.FPS)
