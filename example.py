@@ -60,12 +60,11 @@ benchmark = VSBenchmark(
     param_mapping=param_mapping,
 )
 
-# If function signatures match, the call can be simplified
-
+# In the case that you want to pass your own args, usage is simple
 benchmark = VSBenchmark(
     functions={
-        "std boxblur": lambda x, params: core.std.BoxBlur(x, **params),
-        "zip boxblur": lambda x, params: core.vszip.BoxBlur(x, **params)
+        "std boxblur": lambda x, params: core.std.BoxBlur(x, **params, hpasses=2, vpasses=2),
+        "zip boxblur": lambda x, params: core.vszip.BoxBlur(x, **params, hpasses=2, vpasses=2)
     },
     formats=[vs.GRAY16, vs.GRAYS],
     resolutions=[(1920, 1080), (3840, 2160)],
