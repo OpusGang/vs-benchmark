@@ -76,7 +76,7 @@ benchmark.run_benchmark()
 benchmark.save_results('benchmark_results.json', overwrite=True)
 
 # Display results for specific metrics
-benchmark.display_results(Metric.TIME | Metric.FPS | Metric.CPU_USAGE)
+benchmark.display_results(Metric.TIME | Metric.FPS | Metric.CPU_USAGE | Metric.PERFORMANCE_EFFICIENCY)
 
 # Display best funciton
 benchmark.compare_functions(Metric.FPS)

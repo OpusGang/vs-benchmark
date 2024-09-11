@@ -1,12 +1,10 @@
-import json
 from typing import Any, Callable, Dict, List, Optional, Self, Tuple, Union
-from vstools import vs, core, clip_async_render
 from dataclasses import dataclass, field
 import itertools
-import os
 from tabulate import tabulate
 
-from .utils import Logger, Metric
+from vstools import vs, core, clip_async_render
+from .utils import Logger, Results, Metric
 
 
 @dataclass
@@ -85,7 +83,7 @@ class VSBenchmark:
 
                             passes_data = []
                             for _ in range(self.passes):
-                                print(f"running {resolution}, frames={length}, {func_name, params}, threads={thread_count}, pass={_}            ", end="\r")  # type: ignore
+                                print(f"running {resolution}, {format.name}, frames={length}, {func_name, params}, threads={thread_count}, pass={_}            ", end="\r")  # type: ignore
 
                                 clip = core.std.BlankClip(width=resolution[0], height=resolution[1], format=format, length=length, keep=False)
                                 logger.log_start()
@@ -99,92 +97,21 @@ class VSBenchmark:
                                 self._single_thread_time = metrics[Metric.TIME]
 
     def _calculate_metrics(self: Self, passes_data: List[Dict[str, float]], thread_count: int, single_thread_time: Optional[float], length: int) -> Dict[Metric, float]:
+
         avg_time = sum(pass_data['elapsed_time'] for pass_data in passes_data) / len(passes_data)
+        fps = length / avg_time
+        cpu_usage = sum(pass_data['cpu_percent'] for pass_data in passes_data) / len(passes_data)
+
+        perf_eff = fps / (cpu_usage / 100 + 1)
+
         return {
             Metric.TIME: avg_time,
-            Metric.FPS: length / avg_time,
-            Metric.EFFICIENCY: (single_thread_time / avg_time) / thread_count if single_thread_time and thread_count > 1 else 1.0,
-            Metric.CPU_USAGE: sum(pass_data['cpu_percent'] for pass_data in passes_data) / len(passes_data),
-            Metric.MEMORY_USAGE: sum(pass_data['memory_usage'] for pass_data in passes_data) / len(passes_data)
+            Metric.FPS: fps,
+            Metric.THREADING_EFFICIENCY: (single_thread_time / avg_time) / thread_count if single_thread_time and thread_count > 1 else 1.0,
+            Metric.CPU_USAGE: cpu_usage,
+            Metric.MEMORY_USAGE: sum(pass_data['memory_usage'] for pass_data in passes_data) / len(passes_data),
+            Metric.PERFORMANCE_EFFICIENCY: perf_eff
         }
-
-    def save_results(self: Self, filename: str, overwrite: bool = False) -> None:
-        """
-        Save the benchmark results to a JSON file.
-
-        Args:
-            filename (str): The name of the file to save the results to.
-            overwrite (bool): If True, overwrite the file if it exists. If False, raise an error if the file exists. Defaults to False.
-
-        Raises:
-            FileExistsError: If the file already exists and overwrite is False.
-        """
-        if os.path.exists(filename) and not overwrite:
-            raise FileExistsError(f"The file '{filename}' already exists. Use overwrite=True to overwrite it.")
-
-        serialized_results = self._serialize_results()
-        with open(filename, 'w') as f:
-            json.dump(serialized_results, f, indent=2)
-
-    def _serialize_results(self: Self) -> Dict:
-        """
-        Convert the results to a JSON-serializable format.
-
-        Returns:
-            Dict: A dictionary containing the serialized benchmark results.
-        """
-        serialized = {}
-        for func_params, resolutions in self._results.items():
-            serialized[func_params] = {}
-            for resolution, formats in resolutions.items():
-                serialized[func_params][str(resolution)] = {}
-                for format, thread_results in formats.items():
-                    serialized[func_params][str(resolution)][format.name] = {
-                        str(threads): {metric.name: value for metric, value in results.items()}
-                        for threads, results in thread_results.items()
-                    }
-        return serialized
-
-    def load_results(self: Self, filename: str) -> None:
-        """
-        Load benchmark results from a JSON file.
-
-        Args:
-            filename (str): The name of the file to load the results from.
-
-        Raises:
-            FileNotFoundError: If the specified file does not exist.
-        """
-        if not os.path.exists(filename):
-            raise FileNotFoundError(f"The file '{filename}' does not exist.")
-
-        with open(filename, 'r') as f:
-            loaded_data = json.load(f)
-        self._results = self._deserialize_results(loaded_data)
-
-    def _deserialize_results(self: Self, data: Dict) -> Dict:
-        """
-        Convert the loaded data back to the original format.
-
-        Args:
-            data (Dict): The loaded data from the JSON file.
-
-        Returns:
-            Dict: A dictionary containing the deserialized benchmark results.
-        """
-        deserialized = {}
-        for func_params, resolutions in data.items():
-            deserialized[func_params] = {}
-            for resolution_str, formats in resolutions.items():
-                resolution = tuple(map(int, resolution_str.strip('()').split(', ')))
-                deserialized[func_params][resolution] = {}
-                for format_name, thread_results in formats.items():
-                    format = getattr(vs, format_name)
-                    deserialized[func_params][resolution][format] = {
-                        int(threads): {Metric[metric]: value for metric, value in results.items()}
-                        for threads, results in thread_results.items()
-                    }
-        return deserialized
 
     def display_results(self: Self, metrics: Metric = Metric.ALL) -> None:
         """
@@ -193,8 +120,8 @@ class VSBenchmark:
         Args:
             metrics (Metric): Metrics to display. Defaults to Metric.ALL.
         """
-        metric_list: list[Metric] = [m for m in Metric if m in metrics and m != Metric.ALL]
-        headers: list[str] = ['Function', 'Parameters', 'Threads'] + [m.name for m in metric_list]
+        metric_list = [m for m in Metric if m in metrics and m != Metric.ALL]
+        headers = ['Function', 'Parameters', 'Threads'] + [m.name for m in metric_list]
 
         for resolution, formats in self._get_sorted_results():
             print(f"\nResolution: {resolution[0]}x{resolution[1]}")
@@ -247,7 +174,7 @@ class VSBenchmark:
             raise ValueError("Please specify a single metric for comparison")
 
         comparison_data = {}
-        is_higher_better = metric in {Metric.FPS, Metric.EFFICIENCY}
+        is_higher_better = metric in {Metric.FPS, Metric.THREADING_EFFICIENCY, Metric.PERFORMANCE_EFFICIENCY}
 
         for func_params, resolutions in self._results.items():
             func_name, params_str = func_params.split('_', 1) if '_' in func_params else (func_params, '{}')
@@ -289,3 +216,9 @@ class VSBenchmark:
 
         print(f"\nBest Functions Comparison ({metric.name}):")
         print(tabulate(table_data, headers=headers, tablefmt='simple'))
+
+    def save_results(self: Self, filename: str, overwrite: bool = False) -> None:
+        Results.save_results(self._results, filename, overwrite)
+
+    def load_results(self: Self, filename: str) -> None:
+        self._results = Results.load_results(filename)
