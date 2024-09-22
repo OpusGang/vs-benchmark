@@ -1,224 +1,352 @@
-from typing import Any, Callable, Dict, List, Optional, Self, Tuple, Union
-from dataclasses import dataclass, field
 import itertools
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+import time
+import logging
+import inspect
+
+import pandas as pd
+from tqdm import tqdm
 from tabulate import tabulate
 
-from vstools import vs, core, clip_async_render
-from .utils import Logger, Results, Metric
+from vstools import vs, core, clip_async_render, get_color_family
 
+from .utils import Metric
 
-@dataclass
+logging.basicConfig(
+    level=logging.INFO,
+    filename='benchmark.log',
+    filemode='w',
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+
 class VSBenchmark:
-    functions: Dict[str, Callable[[vs.VideoNode, Dict[str, Any]], vs.VideoNode]]
-    formats: List[int] = field(default_factory=lambda: [vs.GRAYS])
-    resolutions: List[Tuple[int, int]] = field(default_factory=lambda: [(1280, 720), (1920, 1080), (3840, 2160)])
-    passes: int = 3
-    max_threads: Optional[int] = None
-    length: int = 240
-    dynamic_length: bool = False
-    param_grid: Optional[Dict[str, Union[List[float], List[int]]]] = None
-    param_mapping: Optional[Dict[str, Union[List[str], Callable[[], List[Dict[str, Any]]]]]] = None
+    def __init__(
+        self,
+        functions: Dict[str, Callable[..., vs.VideoNode]],
+        formats: List[int],
+        resolutions: List[Tuple[int, int]],
+        length: int = 240,
+        passes: int = 3,
+        param_grid: Optional[Dict[str, Union[List[Any], Any]]] = None,
+        tests: Optional[Dict[str, Dict[Union[int, vs.ColorFamily], Dict[str, Union[List[Any], Any]]]]] = None,
+        list_params: Optional[List[str]] = None
+    ):
 
-    def __post_init__(self: Self) -> None:
-        self._results = {}
-        self._single_thread_time = None
-        if self.dynamic_length:
-            self.base_resolution = min(self.resolutions, key=lambda r: r[0] * r[1])
+        self.functions = functions
+        self.passes = passes if passes else 3
+        self.formats = formats
+        self.resolutions = resolutions
+        self.length = length
+        self.param_grid = param_grid if param_grid else {}
+        self.tests = tests if tests is not None else {}
+        self.list_params = list_params if list_params is not None else ['planes']
 
-        if self.param_grid is None:
-            self.param_grid = {}
+        self.results = pd.DataFrame()
 
-        if self.param_mapping is None:
-            self.param_mapping = {func_name: list(self.param_grid.keys()) for func_name in self.functions}
-        elif not self.param_mapping:
-            self.param_mapping = {func_name: [] for func_name in self.functions}
+    def generate_test_cases(self) -> List[Dict]:
+        test_cases = []
 
-    def _generate_thread_counts(self: Self) -> List[int]:
-        if self.max_threads is None:
-            return [core.num_threads]
+        for func_name, func in self.functions.items():
+            for fmt in self.formats:
+                color_family = get_color_family(fmt)
 
-        base_counts = [1, 2, 4, 6, 8, 12, 16]
-        return sorted(set(count for count in itertools.chain(base_counts, range(24, self.max_threads + 1, 8)) 
-                          if count <= self.max_threads))
+                applicable_tests = {}
+                if func_name in self.tests:
 
-    def _generate_param_combinations(self: Self, func_name: str) -> List[Dict[str, Any]]:
-        mapping = self.param_mapping.get(func_name, [])
+                    specific_format_test = self.tests[func_name].get(fmt, None)
+                    if specific_format_test:
+                        applicable_tests = specific_format_test.copy()
 
-        if callable(mapping):
-            return mapping()
+                    if not applicable_tests:
+                        family_test = self.tests[func_name].get(color_family, None)
+                        if family_test:
+                            applicable_tests = family_test.copy()
 
-        if not mapping:
-            return [{}]
+                if applicable_tests:
+                    applicable_parameters = applicable_tests
+                else:
+                    applicable_parameters = self.param_grid.copy()
 
-        relevant_params = {k: v for k, v in self.param_grid.items() if k in mapping}
-        return [dict(zip(relevant_params.keys(), v)) for v in itertools.product(*relevant_params.values())]
+                normalized_params = self._normalize_params(applicable_parameters)
 
-    def _calculate_length(self: Self, resolution: Tuple[int, int]) -> int:
-        if not self.dynamic_length:
-            return self.length
+                extracted_list_params = {k: v for k, v in normalized_params.items() if k in self.list_params}
+                other_params = {k: v for k, v in normalized_params.items() if k not in self.list_params}
 
-        base_pixels = self.base_resolution[0] * self.base_resolution[1]
-        resolution_pixels = resolution[0] * resolution[1]
-        resolution_factor = base_pixels / resolution_pixels
+                for k, v in other_params.items():
+                    if not isinstance(v, list):
+                        other_params[k] = [v]
 
-        # Always return at least 1 frame
-        return max(1, round(self.length * resolution_factor))
+                if other_params:
+                    keys = list(other_params.keys())
+                    values = [other_params[key] for key in keys]
 
-    def run_benchmark(self: Self) -> None:
-        thread_counts = self._generate_thread_counts()
-        logger = Logger()
+                    for combination in itertools.product(*values):
+                        param_dict = dict(zip(keys, combination))
+                        for k, v in extracted_list_params.items():
+                            param_dict[k] = v
 
+                        if not self.validate_function_params(func, param_dict, fmt):
+                            logging.error(f"Function '{func_name}' cannot accept parameters {param_dict}. Skipping test case.")
+                            print(f"Error: Function '{func_name}' cannot accept parameters {param_dict}. Skipping test case.")
+                            continue
+
+                        test_case = {
+                            'test_name': func_name,
+                            'function': func,
+                            'params': param_dict,
+                            'format': fmt
+                        }
+                        test_cases.append(test_case)
+                else:
+                    param_dict = {}
+                    for k, v in extracted_list_params.items():
+                        param_dict[k] = v
+
+                    if not self.validate_function_params(func, param_dict, fmt):
+                        logging.error(f"Function '{func_name}' cannot accept parameters {param_dict}. Skipping test case.")
+                        print(f"Error: Function '{func_name}' cannot accept parameters {param_dict}. Skipping test case.")
+                        continue
+
+                    test_case = {
+                        'test_name': func_name,
+                        'function': func,
+                        'params': param_dict,
+                        'format': fmt
+                    }
+                    test_cases.append(test_case)
+
+        return test_cases
+
+    def _normalize_params(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        normalized = {}
+        for k, v in params.items():
+            if isinstance(v, dict):
+                logging.warning(f"Parameter '{k}' is a dictionary. It will be treated as a single parameter.")
+                normalized[k] = v
+            elif not isinstance(v, list) and k not in self.list_params:
+                normalized[k] = [v]
+            else:
+                normalized[k] = v
+
+        return normalized
+
+    def validate_function_params(self, func: Callable, params: Dict[str, Any], fmt: int) -> bool:
+        try:
+            sig = inspect.signature(func)
+            if 'format' in params:
+                dummy_clip = core.std.BlankClip(format=params['format'], length=self.length)
+            else:
+                dummy_clip = core.std.BlankClip(format=fmt, length=self.length)
+            sig.bind(dummy_clip, **params)
+            return True
+        except TypeError as e:
+            logging.error(f"Parameter binding failed for function '{func.__name__}': {e}")
+            return False
+
+    def benchmark_function(self, func: Callable, clip: vs.VideoNode, params: Dict[str, Any]) -> Tuple[float, float]:
+        # perf_counter doesn't match asnyc_render
+        start_time = time.time()
+
+        # not sure if puttingt logging within time.time is ideal xd
+        try:
+            processed_clip = func(clip, **params)
+            clip_async_render(processed_clip)
+        except Exception as e:
+            logging.error(f"Error processing function '{func.__name__}' with params {params}: {e}")
+            raise e
+
+        end_time = time.time()
+
+        elapsed_time = end_time - start_time
+        fps = self.length / elapsed_time if elapsed_time > 0 else float('inf')
+        return elapsed_time, fps
+
+    def run_benchmark(self):
+        test_cases = self.generate_test_cases()
+
+        format_to_test_cases = {}
+        for test_case in test_cases:
+            fmt = test_case['format']
+            if fmt not in format_to_test_cases:
+                format_to_test_cases[fmt] = []
+            format_to_test_cases[fmt].append(test_case)
+
+        total_tests = 0
         for resolution in self.resolutions:
-            length = self._calculate_length(resolution)
-            for format in self.formats:
-                for func_name, func in self.functions.items():
-                    param_combinations = self._generate_param_combinations(func_name)
-                    for params in param_combinations:
-                        result_key = f"{func_name}_{params}" if params else func_name
-                        self._results.setdefault(result_key, {}).setdefault(resolution, {}).setdefault(format, {})
+            for fmt in self.formats:
+                applicable_test_cases = format_to_test_cases.get(fmt, [])
+                total_tests += len(applicable_test_cases) * self.passes
 
-                        for thread_count in thread_counts:
-                            if self.max_threads is not None:
-                                core.num_threads = thread_count
+        if total_tests == 0:
+            print("No test cases to run.")
+            return
 
-                            passes_data = []
-                            for _ in range(self.passes):
-                                print(f"running {resolution}, {format.name}, frames={length}, {func_name, params}, threads={thread_count}, pass={_}            ", end="\r")  # type: ignore
+        bar_format = 'Progress: {percentage:3.0f}%|{bar:30}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]'
 
-                                clip = core.std.BlankClip(width=resolution[0], height=resolution[1], format=format, length=length, keep=False)
-                                logger.log_start()
-                                clip_async_render(func(clip, params))
-                                passes_data.append(logger.log_end())
+        results = []
+        try:
+            # why doesn't this have a decorator wtf
+            with tqdm(total=total_tests, unit="test", bar_format=bar_format) as pbar:
+                for resolution in self.resolutions:
+                    width, height = resolution
+                    for fmt in self.formats:
+                        # hmmm...
+                        fmt_name = str(fmt.name) # type: ignore
 
-                            metrics = self._calculate_metrics(passes_data, thread_count, self._single_thread_time, length)
-                            self._results[result_key][resolution][format][thread_count] = metrics
+                        applicable_test_cases = format_to_test_cases.get(fmt, [])
+                        if not applicable_test_cases:
+                            logging.warning(f"No test cases found for format {fmt_name}. Skipping.")
+                            continue
 
-                            if thread_count == 1:
-                                self._single_thread_time = metrics[Metric.TIME]
+                        try:
+                            clip = core.std.BlankClip(width=width, height=height, format=fmt, length=self.length)
+                        except Exception as e:
+                            logging.error(f"Failed to create BlankClip with resolution {resolution} and format {fmt_name}: {e}")
+                            print(f"Error: Failed to create BlankClip with resolution {resolution} and format {fmt_name}: {e}")
 
-    def _calculate_metrics(self: Self, passes_data: List[Dict[str, float]], thread_count: int, single_thread_time: Optional[float], length: int) -> Dict[Metric, float]:
+                            pbar.update(len(applicable_test_cases) * self.passes)
+                            continue
 
-        avg_time = sum(pass_data['elapsed_time'] for pass_data in passes_data) / len(passes_data)
-        fps = length / avg_time
-        cpu_usage = sum(pass_data['cpu_percent'] for pass_data in passes_data) / len(passes_data)
+                        for test_case in applicable_test_cases:
+                            func_name = test_case['test_name']
+                            func = test_case['function']
+                            params = test_case['params']
 
-        perf_eff = fps / (cpu_usage / 100 + 1)
+                            for pass_num in range(self.passes):
+                                current_test = f"Function: {func_name}, Params: {params}, Pass: {pass_num + 1}"
+                                pbar.set_postfix_str(current_test)
+                                try:
+                                    elapsed_time, fps = self.benchmark_function(func, clip, params)
+                                    results.append({
+                                        'Function': func_name,
+                                        'Resolution': f'{width}x{height}',
+                                        'Format': fmt_name,
+                                        'Params': str(params),
+                                        'Pass': pass_num + 1,
+                                        'Time': elapsed_time,
+                                        'FPS': fps
+                                    })
+                                    logging.info(f"Test: {func_name}, Params: {params}, Resolution: {resolution}, Format: {fmt_name}, Pass: {pass_num + 1}, Time: {elapsed_time:.4f}s, FPS: {fps:.2f}")
+                                except Exception as e:
+                                    logging.error(f"Error in Test: {func_name}, Params: {params}, Resolution: {resolution}, Format: {fmt_name}, Pass: {pass_num + 1} - {e}")
 
-        return {
-            Metric.TIME: avg_time,
-            Metric.FPS: fps,
-            Metric.THREADING_EFFICIENCY: (single_thread_time / avg_time) / thread_count if single_thread_time and thread_count > 1 else 1.0,
-            Metric.CPU_USAGE: cpu_usage,
-            Metric.MEMORY_USAGE: sum(pass_data['memory_usage'] for pass_data in passes_data) / len(passes_data),
-            Metric.PERFORMANCE_EFFICIENCY: perf_eff
-        }
+                                    results.append({
+                                        'Function': func_name,
+                                        'Resolution': f'{width}x{height}',
+                                        'Format': fmt_name,
+                                        'Params': str(params),
+                                        'Pass': pass_num + 1,
+                                        'Time': float('nan'),
+                                        'FPS': float('nan')
+                                    })
+                                pbar.update(1)
 
-    def display_results(self: Self, metrics: Metric = Metric.ALL) -> None:
-        """
-        Display the benchmark results in a tabular format, grouped by resolution and format.
+        except KeyboardInterrupt:
+            logging.warning("Benchmarking interrupted by user.")
+            print("Benchmarking interrupted by user.")
+        finally:
+            self.results = pd.DataFrame(results)
 
-        Args:
-            metrics (Metric): Metrics to display. Defaults to Metric.ALL.
-        """
-        metric_list = [m for m in Metric if m in metrics and m != Metric.ALL]
-        headers = ['Function', 'Parameters', 'Threads'] + [m.name for m in metric_list]
+    def display_results(self):
+        if self.results.empty:
+            print("No results to display.")
+            return
 
-        for resolution, formats in self._get_sorted_results():
-            print(f"\nResolution: {resolution[0]}x{resolution[1]}")
+        grouped = self.results.groupby(['Resolution', 'Format', 'Function', 'Params'])
+        summary = grouped.agg({
+            'Time': ['min', 'max', 'mean'],
+            'FPS': ['min', 'max', 'mean']
+        }).reset_index()
+        summary.columns = ['Resolution', 'Format', 'Function', 'Params', 'Time_Min', 'Time_Max', 'Time_Avg', 'FPS_Min', 'FPS_Max', 'FPS_Avg']
 
-            for format, results in formats.items():
-                print(f"\nFormat: {format.name}")
+        function_order = {func: i for i, func in enumerate(self.functions.keys())}
+        summary['sort_key'] = summary['Function'].map(function_order)  # type: ignore
+
+        for resolution in summary['Resolution'].unique():
+            print(f"\nResolution: {resolution}\n")
+            for format in summary['Format'].unique():
+                print(f"Format: {format}")
+
+                data = summary[(summary['Resolution'] == resolution) & (summary['Format'] == format)].copy()
+
+                if data.empty:
+                    print("No data available for this format.")
+                    continue
+
+                best_time = data['Time_Avg'].min()
+                data['Relative'] = best_time / data['Time_Avg']
+
+                data = data.sort_values('sort_key')  # type: ignore
 
                 table_data = []
-                for func_params, thread_results in results.items():
-                    func_name, params_str = func_params.split('_', 1) if '_' in func_params else (func_params, '{}')
-                    params = eval(params_str)
+                for _, row in data.iterrows():
+                    table_data.append([
+                        row['Function'],
+                        row['Params'],
+                        # // TODO
+                        # it would be super poggers if {.2f} was dynamic based on the largest result
+                        # this woud ensure a consistent table size
+                        # TO AVOID THIS:
+                        # 692.73 [677.52, 711.99]
+                        # 1178.32 [1097.38, 1262.42]
+                        #
+                        # with dynamic formatting
+                        # 692.730 [677.520, 711.990]
+                        # 1178.32 [1097.38, 1262.42]
+                        f"{row['Time_Avg']:.2f} [{row['Time_Min']:.2f}, {row['Time_Max']:.2f}]",
+                        f"{row['FPS_Avg']:.2f} [{row['FPS_Min']:.2f}, {row['FPS_Max']:.2f}]",
+                        f"{row['Relative']:.2f}"
+                    ])
 
-                    for threads, metric_results in thread_results.items():
-                        row = [
-                            func_name,
-                            ', '.join(f'{k}={v}' for k, v in params.items()),
-                            threads
-                        ]
-                        row.extend([f"{metric_results[metric]:.2f}" for metric in metric_list])
-                        table_data.append(row)
-
-                print(tabulate(table_data, headers=headers, tablefmt='simple'))
+                headers = ['Function', 'Params', 'Time [min, max]', 'FPS [min, max]', 'Relative']
+                print(tabulate(table_data, headers=headers, tablefmt="simple"))
                 print()
 
-    def _get_sorted_results(self: Self) -> List[Tuple[Tuple[int, int], Dict]]:
-        """
-        Sort and restructure the results for easier display.
+    def compare_functions(self, metric: Metric):
+        if metric not in [Metric.TIME, Metric.FPS]:
+            raise ValueError("Invalid metric for comparison. Choose Metric.TIME or Metric.FPS.")
 
-        Returns:
-            List[Tuple[Tuple[int, int], Dict]]: Sorted list of (resolution, formats) tuples.
-        """
-        sorted_results = []
-        for resolution in sorted(set(res for func in self._results.values() for res in func.keys())):
-            formats = {}
-            for format in sorted(set(fmt for func in self._results.values() for fmt in func[resolution].keys()), key=lambda f: f.name):
-                format_results = {}
-                for func_params, func_results in self._results.items():
-                    if resolution in func_results and format in func_results[resolution]:
-                        format_results[func_params] = func_results[resolution][format]
-                formats[format] = format_results
-            sorted_results.append((resolution, formats))
-        return sorted_results
+        if self.results.empty:
+            print("No results to compare.")
+            return
 
-    def compare_functions(self: Self, metric: Metric = Metric.FPS) -> None:
-        """
-        Compare functions and find the best one for each format and resolution based on a specific metric.
-        For FPS and EFFICIENCY, higher is better. For other metrics, lower is better.
-        """
-        if metric == Metric.ALL or metric not in Metric:
-            raise ValueError("Please specify a single metric for comparison")
+        metric_name = metric.value
 
-        comparison_data = {}
-        is_higher_better = metric in {Metric.FPS, Metric.THREADING_EFFICIENCY, Metric.PERFORMANCE_EFFICIENCY}
+        grouped = self.results.groupby(['Resolution', 'Format', 'Function', 'Params'])
+        summary = grouped[metric_name].mean().reset_index()
 
-        for func_params, resolutions in self._results.items():
-            func_name, params_str = func_params.split('_', 1) if '_' in func_params else (func_params, '{}')
-            params = eval(params_str)
+        best_functions = summary.copy()
+        if metric == Metric.TIME:
+            best_functions['Rank'] = best_functions.groupby(['Resolution', 'Format'])[metric_name].rank(
+                ascending=True, method='min'
+            )
+        else:
+            best_functions['Rank'] = best_functions.groupby(['Resolution', 'Format'])[metric_name].rank(
+                ascending=False, method='min'
+            )
+        best_functions = best_functions[best_functions['Rank'] == 1]
 
-            for resolution, formats in resolutions.items():
-                for format, thread_results in formats.items():
-                    key = (resolution, format.name)
-                    if key not in comparison_data:
-                        comparison_data[key] = {'best_value': None, 'best_func': None, 'best_params': None, 'best_thread': None}
+        headers = ['Resolution', 'Format', 'Best Function', 'Best Parameters', f'Best {metric_name}']
+        table_data = best_functions[['Resolution', 'Format', 'Function', 'Params', metric_name]].values.tolist()
 
-                    for thread_count, results in thread_results.items():
-                        value = results[metric]
-                        current_best = comparison_data[key]['best_value']
+        print(f"\nBest Functions Comparison ({metric_name}):")
+        print(tabulate(table_data, headers=headers, tablefmt="simple", floatfmt=".2f"))
+        print()
 
-                        if (current_best is None or 
-                            (is_higher_better and value > current_best) or
-                            (not is_higher_better and value < current_best)):
-                            comparison_data[key] = {
-                                'best_value': value,
-                                'best_func': func_name,
-                                'best_params': params,
-                                'best_thread': thread_count
-                            }
+    def save_results(self, filename: str):
+        if self.results.empty:
+            print("No results to export.")
+            return
+        try:
+            export_df = self.results.copy()
+            export_df['Format'] = export_df['Format'].apply(lambda x: x if isinstance(x, str) else str(x))
+            export_df['Params'] = export_df['Params'].apply(lambda x: x if isinstance(x, str) else str(x))
+            export_df.to_csv(filename, index=False)
+            print(f"Results exported to {filename}")
+            logging.info(f"Results exported to {filename}")
+        except Exception as e:
+            logging.error(f"Failed to export results to CSV: {e}")
+            print(f"Error: Failed to export results to CSV: {e}")
 
-        headers = ['Resolution', 'Format', 'Best Function', 'Best Parameters', 'Best Thread Count', f'Best {metric.name}']
-        table_data = []
-
-        for (resolution, format), data in comparison_data.items():
-            row = [
-                f'{resolution[0]}x{resolution[1]}',
-                format,
-                data['best_func'],
-                ', '.join(f'{k}={v}' for k, v in data['best_params'].items()) if data['best_params'] else 'N/A',
-                data['best_thread'],
-                f"{data['best_value']:.2f}"
-            ]
-            table_data.append(row)
-
-        print(f"\nBest Functions Comparison ({metric.name}):")
-        print(tabulate(table_data, headers=headers, tablefmt='simple'))
-
-    def save_results(self: Self, filename: str, overwrite: bool = False) -> None:
-        Results.save_results(self._results, filename, overwrite)
-
-    def load_results(self: Self, filename: str) -> None:
-        self._results = Results.load_results(filename)
+    def get_results(self) -> pd.DataFrame:
+        return self.results

@@ -1,40 +1,31 @@
-import itertools
 from vstools import vs, core
 from vsrgtools import box_blur
+
 from vsbenchmark import VSBenchmark, Metric
 
-_range = range(1, 2)
-
-
-def box_blur_generator() -> list[dict[str, int]]:
-    passes = _range
-    radii = _range
-    return [{'passes': p, 'radius': r} for p, r in itertools.product(passes, radii)]
-
-
-param_grid = {
-    'hpasses': list(_range),
-    'vpasses': list(_range),
-    'hradius': list(_range),
-    'vradius': list(_range),
-    'passes': list(_range),
-    'radius': list(_range)
-}
-
-param_mapping = {
-    "std boxblur": ['hpasses', 'vpasses', 'hradius', 'vradius'],
-    "avx boxblur": ['hpasses', 'vpasses', 'hradius', 'vradius'],
-    "zig boxblur": ['hpasses', 'vpasses', 'hradius', 'vradius'],
-    "zip boxblur": ['hpasses', 'vpasses', 'hradius', 'vradius'],
-    "jet boxblur": box_blur_generator
-}
-
 functions = {
-    "std boxblur": lambda x, params: core.std.BoxBlur(x, **params),
-    "avx boxblur": lambda x, params: core.box.Blur(x, **params),
-    "zig boxblur": lambda x, params: core.zboxblur.Blur(x, **params),
-    "zip boxblur": lambda x, params: core.vszip.BoxBlur(x, **params),
-    "jet boxblur": lambda x, params: box_blur(x, **params)
+    "std boxblur": core.std.BoxBlur,
+    "avx boxblur": core.box.Blur,
+    "zig boxblur": core.zboxblur.Blur,
+    "zip boxblur": core.vszip.BoxBlur,
+    "jet boxblur": box_blur,
+}
+
+_range = list(range(1, 2))
+
+params = {
+    'hpasses': _range,
+    'vpasses': _range,
+    'hradius': _range,
+    'vradius': _range,
+}
+
+tests = {
+    "jet boxblur": {
+        vs.YUV:     {'radius': 1, 'passes': 1},
+        vs.RGB:     {'radius': 1, 'passes': 1},
+        vs.GRAY:    {'radius': 1, 'passes': 1},
+    },
 }
 
 # I am generally of the thought that when testing function performance
@@ -51,36 +42,25 @@ core.num_threads = 1
 benchmark = VSBenchmark(
     functions=functions,
     formats=[vs.GRAY16, vs.GRAYS],
-    resolutions=[(1920, 1080), (3840, 2160)],
-    length=240,
-    dynamic_length=True,
-    max_threads=None,
+    resolutions=[(1920, 1080)],
+    length=500,
     passes=3,
-    param_grid=param_grid,
-    param_mapping=param_mapping,
+    param_grid=params,
+    tests=tests,
 )
 
 # In the case that you want to pass your own args, usage is simple
 benchmark = VSBenchmark(
     functions={
-        "std boxblur": lambda x, params: core.std.BoxBlur(x, **params, hpasses=2, vpasses=2),
-        "zip boxblur": lambda x, params: core.vszip.BoxBlur(x, **params, hpasses=2, vpasses=2)
+        "std boxblur": lambda x: core.std.BoxBlur(x, hpasses=2, vpasses=2),
+        "zip boxblur": lambda x: core.vszip.BoxBlur(x, hpasses=2, vpasses=2)
     },
     formats=[vs.GRAY16, vs.GRAYS],
     resolutions=[(1920, 1080), (3840, 2160)],
-    length=240
+    length=500,
+    passes=3
 )
 
-# Run benchmark and save data to json
 benchmark.run_benchmark()
-benchmark.save_results('benchmark_results.json', overwrite=True)
-
-# Display results for specific metrics
-benchmark.display_results(Metric.TIME | Metric.FPS | Metric.CPU_USAGE | Metric.PERFORMANCE_EFFICIENCY)
-
-# Display best funciton
+benchmark.display_results()
 benchmark.compare_functions(Metric.FPS)
-
-# Load existing data and compare functions based on FPS
-# benchmark.load_results('benchmark_results.json')
-# benchmark.compare_functions(Metric.FPS)
